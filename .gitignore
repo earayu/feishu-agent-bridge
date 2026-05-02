@@ -1,0 +1,6 @@
+node_modules/
+app.json
+routing.json
+logs/
+*.log
+.env

@@ -1,0 +1,7 @@
+{
+  "_comment": "Map Feishu chat_id -> target string. The target is passed as-is to your handler.",
+  "_comment2": "Copy this file to routing.json and fill in your chat IDs.",
+
+  "oc_xxxxxxxxxxxxxxxxxxxx": "my-team-channel",
+  "oc_yyyyyyyyyyyyyyyyyyyy": "support-inbox"
+}
