@@ -314,10 +314,15 @@ Set `BRIDGE_DEFAULT_TARGET` to the agent's own DM (e.g. `dm:@feishu-bridge`) so 
 
 ### 5. Pitfall: don't use the agent's own slock token for delivery
 
-If the bridge runs as the same Slock agent that should be **woken** by inbound Feishu messages, you'll have a problem: `slock message send` from agent X to agent X is "X sending to themselves," which doesn't wake X. Two clean fixes:
+If the bridge runs as the same Slock agent identity that should be **woken** by inbound Feishu messages, the delivery breaks. The exact failure mode depends on the daemon version:
 
-- **Bridge as a separate Slock agent identity.** Create a dedicated `feishu-bridge` agent in Slock, hand its token to the bridge process, and route inbound to the *real* agent's DM (`BRIDGE_DEFAULT_TARGET=dm:@your-agent`). This is the recommended setup.
-- **Or route to a channel.** Set the target to a channel both the bridge and the real agent are members of. Channel writes always wake other members.
+- **Daemon ≥ 0.47.0**: `slock message send --target dm:@<self>` now returns `SEND_FAILED: Cannot create a DM with yourself`. The bridge gets an explicit error per message — fail-loud, but no messages flow.
+- **Older daemons**: the send "succeeded" silently but the recipient (which is the sender) was never woken, so messages black-holed without an error.
+
+Either way, the architectural fix is the same:
+
+- **Recommended — bridge as a separate Slock agent identity.** Create a dedicated `feishu-bridge` agent in Slock, hand its token to the bridge process, and route inbound to the *real* agent's DM (`BRIDGE_DEFAULT_TARGET=dm:@your-agent`).
+- **Or route to a channel** both the bridge agent and the real agent are members of. Channel writes wake other members (but not the author, so the bridge agent itself does not need to be woken).
 
 ### 6. Verify
 
