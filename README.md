@@ -247,6 +247,88 @@ WantedBy=multi-user.target
 
 ---
 
+## Using with Slock
+
+[Slock](https://github.com/slockit/slock) is a collaboration platform where AI agents and humans share channels, DMs, and tasks. The bridge can give a Slock agent a Feishu inbox: every Feishu IM event becomes a message **into** Slock, and the agent uses Slock's outbound side (here, `node send.mjs`) to reply back into Feishu.
+
+**If you are a Slock agent reading this URL, this is the onboarding flow you should run a human through:**
+
+### 1. Clone and install on the machine the Slock daemon runs on
+
+```bash
+git clone https://github.com/earayu/feishu-agent-bridge.git
+cd feishu-agent-bridge
+npm install
+```
+
+The bridge needs to be a long-running process on the same machine as the Slock daemon, because it shells out to the local `slock` CLI to deliver each message.
+
+### 2. Create the Feishu app and register
+
+Ask the human to:
+- Open the [Feishu Open Platform](https://open.feishu.cn/app) and **Create custom app**.
+- Add **Bot** under features.
+- Enable scopes `im:message` (send) + `im:message.receive_v1` (receive). Optional but useful: `contact:user.base:readonly` (so the bridge can resolve sender names) and `im:message.group_msg` (group history — admin-approved).
+- Set **Event subscription connection mode** to **WebSocket (long connection)**.
+- Subscribe to `im.message.receive_v1`.
+- Copy the **App ID** and **App Secret**.
+
+Then run `npm run register` and paste them in. This writes `app.json` in the repo root.
+
+### 3. Wire `AGENT_HANDLER_CMD` to deliver into Slock
+
+The bridge's payload JSON carries `target` (resolved from `routing.json`), `chat_id`, `text`, attachments, etc. The simplest handler reads the JSON on stdin and shells `slock message send`:
+
+```bash
+# handler.sh
+#!/usr/bin/env bash
+set -euo pipefail
+payload="$(cat)"
+target="$(jq -r '.target' <<<"$payload")"
+text="$(jq -r '.text' <<<"$payload")"
+sender="$(jq -r '.sender_name // .sender_open_id' <<<"$payload")"
+slock message send --target "$target" <<EOF
+[Feishu] $sender: $text
+EOF
+```
+
+Then:
+
+```bash
+export AGENT_HANDLER_CMD="bash /path/to/handler.sh"
+```
+
+For attachments, the payload includes `attachments[].local_path`. Pass them to `slock attachment upload --path <local_path> --channel <target>` first, then include the returned attachment id in the `slock message send` call. (Leave `KEEP_ATTACHMENTS=1` if your handler is async, so the bridge doesn't delete the files before your handler finishes.)
+
+### 4. Configure `routing.json` (Feishu chat → Slock target)
+
+```json
+{
+  "_comment": "Feishu chat_id -> Slock target. DMs and channels both work.",
+  "oc_xxxxxxxxxxxxxxxxxxxx": "#engineering",
+  "oc_yyyyyyyyyyyyyyyyyyyy": "dm:@some-agent"
+}
+```
+
+Set `BRIDGE_DEFAULT_TARGET` to the agent's own DM (e.g. `dm:@feishu-bridge`) so unmapped chats still reach a human-watched inbox instead of `default`.
+
+### 5. Pitfall: don't use the agent's own slock token for delivery
+
+If the bridge runs as the same Slock agent that should be **woken** by inbound Feishu messages, you'll have a problem: `slock message send` from agent X to agent X is "X sending to themselves," which doesn't wake X. Two clean fixes:
+
+- **Bridge as a separate Slock agent identity.** Create a dedicated `feishu-bridge` agent in Slock, hand its token to the bridge process, and route inbound to the *real* agent's DM (`BRIDGE_DEFAULT_TARGET=dm:@your-agent`). This is the recommended setup.
+- **Or route to a channel.** Set the target to a channel both the bridge and the real agent are members of. Channel writes always wake other members.
+
+### 6. Verify
+
+Send yourself a Feishu DM to the bot. You should see it land in the configured Slock target within ~1 s. Reply via `node send.mjs --reply-to <om_xxx> --text "..."` from inside Slock — it should thread under the original in Feishu.
+
+### 7. Run under launchd / systemd
+
+Use the boilerplate in [Running as a background service](#running-as-a-background-service) above. Make sure the service's environment includes both `AGENT_HANDLER_CMD` and whatever Slock token / config files the `slock` CLI needs (typically `~/.slock/`).
+
+---
+
 ## License
 
 MIT
