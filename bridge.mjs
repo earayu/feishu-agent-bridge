@@ -20,7 +20,7 @@ for (const k of ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_
 }
 
 import * as lark from '@larksuiteoapi/node-sdk';
-import { readFile, appendFile, mkdir, unlink } from 'node:fs/promises';
+import { readFile, writeFile, appendFile, mkdir, unlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
@@ -31,6 +31,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_FILE = path.join(__dirname, 'app.json');
 const ROUTING_FILE = path.join(__dirname, 'routing.json');
 const LOG_FILE = path.join(__dirname, 'logs', 'bridge.log');
+const SEEN_FILE = path.join(__dirname, 'logs', 'bridge-seen-messages.json');
 const TMP_DIR = path.join(os.tmpdir(), 'feishu-bridge-attachments');
 const DEFAULT_TARGET = process.env.BRIDGE_DEFAULT_TARGET || 'default';
 
@@ -50,10 +51,19 @@ async function log(level, ...args) {
 }
 
 // --- routing: chat_id -> target string ---
+// routing.json may contain `_comment` / `_history` / other underscore-prefixed
+// metadata keys for documentation purposes. They are stripped here so that
+// resolveTarget() only sees real chat_id -> target mappings. Real Feishu chat
+// IDs never start with `_`, so this is safe.
 async function loadRouting() {
   if (!existsSync(ROUTING_FILE)) return {};
   try {
-    return JSON.parse(await readFile(ROUTING_FILE, 'utf8'));
+    const raw = JSON.parse(await readFile(ROUTING_FILE, 'utf8'));
+    const out = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (!k.startsWith('_') && typeof v === 'string') out[k] = v;
+    }
+    return out;
   } catch (e) {
     await log('warn', 'routing.json parse error, using empty map:', e.message);
     return {};
@@ -127,17 +137,58 @@ async function downloadResource(client, messageId, ref) {
 }
 
 // --- dedup cache ---
+// In-memory cache with disk persistence: Feishu retries events at-least-once,
+// so without persistence a bridge restart could re-dispatch messages it
+// already handled before the crash. SEEN_FILE survives restarts; in-memory
+// map is the hot path. Entries older than SEEN_TTL_MS are pruned.
 const SEEN_MSGS = new Map();
 const SEEN_TTL_MS = 10 * 60 * 1000;
+let seenDirty = false;
+let seenFlushTimer = null;
+
+async function loadSeenFromDisk() {
+  if (!existsSync(SEEN_FILE)) return;
+  try {
+    const raw = JSON.parse(await readFile(SEEN_FILE, 'utf8'));
+    const now = Date.now();
+    for (const [id, ts] of Object.entries(raw)) {
+      if (typeof ts === 'number' && now - ts <= SEEN_TTL_MS) SEEN_MSGS.set(id, ts);
+    }
+  } catch (e) {
+    await log('warn', 'seen-messages.json parse error, starting fresh:', e.message);
+  }
+}
+
+async function flushSeenToDisk() {
+  if (!seenDirty) return;
+  try {
+    await mkdir(path.dirname(SEEN_FILE), { recursive: true });
+    const obj = {};
+    for (const [id, ts] of SEEN_MSGS) obj[id] = ts;
+    await writeFile(SEEN_FILE, JSON.stringify(obj));
+    seenDirty = false;
+  } catch (e) {
+    await log('warn', 'seen-messages.json write failed:', e.message);
+  }
+}
 
 function isDuplicate(messageId) {
   if (!messageId) return false;
   const now = Date.now();
   for (const [id, ts] of SEEN_MSGS) {
-    if (now - ts > SEEN_TTL_MS) SEEN_MSGS.delete(id);
+    if (now - ts > SEEN_TTL_MS) { SEEN_MSGS.delete(id); seenDirty = true; }
   }
   if (SEEN_MSGS.has(messageId)) return true;
   SEEN_MSGS.set(messageId, now);
+  seenDirty = true;
+  // Debounce disk flushes — coalesce multiple isDuplicate() calls into one
+  // write within a 2 s window to avoid pounding disk under message bursts.
+  if (!seenFlushTimer) {
+    seenFlushTimer = setTimeout(() => {
+      seenFlushTimer = null;
+      flushSeenToDisk();
+    }, 2000);
+  }
   return false;
 }
 
@@ -277,6 +328,7 @@ async function main() {
   }
   const { app_id, app_secret } = JSON.parse(await readFile(APP_FILE, 'utf8'));
   const routing = await loadRouting();
+  await loadSeenFromDisk();
 
   if (!HANDLER_CMD && !HANDLER_WEBHOOK) {
     await log('warn', 'No AGENT_HANDLER_CMD or AGENT_HANDLER_WEBHOOK set — messages will be printed to stdout as JSON.');
@@ -305,7 +357,11 @@ async function main() {
 
   for (const sig of ['SIGINT', 'SIGTERM']) {
     process.on(sig, () => {
-      log('info', `received ${sig}, exiting`).finally(() => process.exit(0));
+      // Flush the seen-messages cache on shutdown so we don't re-process
+      // already-seen messages after a restart.
+      flushSeenToDisk()
+        .finally(() => log('info', `received ${sig}, exiting`))
+        .finally(() => process.exit(0));
     });
   }
 

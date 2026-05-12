@@ -124,6 +124,34 @@ node send.mjs --chat-id <oc_xxx> --text "Hello group"
 node send.mjs --open-id <ou_xxx> --text "Hello"
 ```
 
+### @-mention rewriting
+
+`send.mjs` automatically rewrites `@name` tokens in the message body to Feishu's `<at user_id="ou_xxx">@name</at>` syntax, using a `contacts.json` lookup table. Create `contacts.json` in the project root:
+
+```json
+{
+  "_comment": "Feishu contact map: name (or alias) -> open_id.",
+  "Alice":       "ou_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "alice":       "ou_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "Bob":         "ou_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}
+```
+
+Then `"hello @Alice"` in `--text` becomes a real @-mention that pings Alice in Feishu. Underscore-prefixed keys (e.g. `_comment`) are ignored. Longest-match wins, so `@Alice` matches `Alice` and `@AliceChen` matches `AliceChen` if both are present. Pass `--no-at` to disable rewriting and keep `@name` as literal text.
+
+---
+
+## Other helper scripts
+
+| Script | What it does |
+|---|---|
+| `send-file.mjs <path> <chat_id> [reply_to]` | Upload a file (PDF / docx / xlsx / etc.) and send/reply with it. |
+| `send-md-file.mjs <path> <chat_id> [file_type]` | Upload a Markdown file and emit the resulting `file_key`. |
+| `search.mjs --chat-id <oc_xxx> --query "<keyword>" [--limit 50] [--days 7]` | Keyword search within a Feishu chat's history (client-side filter over recent pages). |
+| `context.mjs --chat-id <oc_xxx> [--limit 20] [--before <om_xxx>]` | Pull recent messages from a Feishu chat as JSONL — useful for agent context windows. |
+
+Run via `npm run send-file` / `npm run search` / etc., or call `node <script>.mjs` directly.
+
 ---
 
 ## Routing
@@ -149,6 +177,12 @@ Chats not in `routing.json` get the value of `BRIDGE_DEFAULT_TARGET` (default: `
 | `AGENT_HANDLER_WEBHOOK` | — | URL to POST message JSON to |
 | `BRIDGE_DEFAULT_TARGET` | `default` | Fallback target for unmapped chat IDs |
 | `KEEP_ATTACHMENTS` | — | Set to `1` to skip auto-cleanup of downloaded attachment files |
+
+---
+
+## Dedup across restarts
+
+Feishu's event delivery is at-least-once: after a network blip or a bridge crash, the platform may redeliver events you already handled. The bridge tracks recently-seen `message_id`s in memory (10 min TTL) and additionally persists them to `logs/bridge-seen-messages.json` so a restart does NOT replay events that were processed before the crash. Writes are debounced (~2 s) under message bursts to avoid disk pressure. No configuration needed — this is on by default.
 
 ---
 
